@@ -1,8 +1,6 @@
 package com.RAGSupport;
 
 import jakarta.annotation.PostConstruct;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.reader.pdf.PagePdfDocumentReader;
@@ -15,11 +13,10 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 @Service
 public class ChatbotService {
-
-    private static final Logger log = LoggerFactory.getLogger(ChatbotService.class);
 
     private final VectorStore vectorStore;
     private final ChatClient chatClient;
@@ -34,60 +31,67 @@ public class ChatbotService {
 
     @PostConstruct
     public void loadKnowledgeBase() {
-        try {
-            List<Document> allChunks = new ArrayList<>();
-            TokenTextSplitter splitter = TokenTextSplitter.builder().withChunkSize(300).build();
+        // 1. Read all PDF files.
+        // 2. FOr each file I will divide them into chunks
+        //3. I will store those chunks in vector DB --> Pinecone.
 
-            // Loop through each PDF file
-            if (policyFiles != null && policyFiles.length > 0) {
-                for (Resource resource : policyFiles) {
-                    PagePdfDocumentReader reader = new PagePdfDocumentReader(resource);
-                    List<Document> pages = reader.read();
-                    List<Document> chunks = splitter.apply(pages);
-                    allChunks.addAll(chunks);
-                }
-                vectorStore.add(allChunks);
-                log.info("Knowledge base loaded successfully: {} chunks indexed into vector store.", allChunks.size());
-            }
-        } catch (Exception e) {
-            log.error("Could not index documents into vector store on startup: {}", e.getMessage(), e);
+        List<Document> allChunks = new ArrayList<>();
+
+        TokenTextSplitter splitter = TokenTextSplitter.builder()
+                .withChunkSize(300)
+                .build();
+
+        // Loop through each PDF file
+        for (Resource resource : policyFiles) {
+
+            PagePdfDocumentReader reader = new PagePdfDocumentReader(resource);
+            List<Document> pages = reader.read();
+            List<Document> chunks = splitter.apply(pages);
+            allChunks.addAll(chunks);
         }
+        vectorStore.add(allChunks);
     }
 
     public String answerUserQuery(String question) {
-        try {
-            List<Document> relevantChunks = vectorStore.similaritySearch(SearchRequest.builder()
-                    .query(question)
-                    .topK(3)
-                    .build()
-            );
-            StringBuilder context = new StringBuilder();
-            if (relevantChunks != null) {
-                for (Document document : relevantChunks) {
-                    context.append(document.getText())
-                            .append("\n\n");
-                }
-            }
-            String finalContext = context.toString();
+        // 1. Question --> vector
+        //2. similrity search in our vector db
+        //3. top 4 results fetch
 
-            String SYSTEM_PROMPT = """
-                     You are an AI customer support assistant for our e-commerce company.
-                    
-                                    Answer the customer using ONLY the company information provided below.
-                                    If the answer is not available in the provided information, say:
-                                    "I don't have that information in the company documents."
-                                    COMPANY INFORMATION
-                                    %s
-                    """.formatted(finalContext);
+        List<Document> relevantChunks = vectorStore.similaritySearch(
+                SearchRequest.builder()
+                        .query(question)
+                        .topK(4)
+                        .build()
+        );
 
-            return chatClient
-                    .prompt(SYSTEM_PROMPT)
-                    .user(question)
-                    .call()
-                    .content();
-        } catch (Exception e) {
-            log.error("Error answering query: {}", e.getMessage(), e);
-            return "An error occurred while processing your request: " + e.getMessage();
+        StringBuilder context = new StringBuilder();
+
+        for (Document document : relevantChunks) {
+
+            context.append(document.getText())
+                    .append("\n\n");
         }
+
+        String finalContext = context.toString();
+
+        String prompt = """
+                You are an AI customer support assistant for our e-commerce company.
+
+                Answer the customer using ONLY the company information provided below.
+
+                If the answer is not available in the provided information, say:
+                "I don't have that information in the company documents."
+                
+                COMPANMY INFORMATION
+                %s
+                
+                """.formatted(finalContext);
+
+        return chatClient.prompt()
+                .system(prompt)
+                .user(question)
+                .call()
+                .content();
     }
+
 }
